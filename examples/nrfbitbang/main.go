@@ -1,5 +1,5 @@
-// nrfbitbang is example how to use nRF24L01+ transceiver connected to PC using USB and
-// FT232RL module.
+// nrfbitbang is example how to use nRF24L01+ transceiver connected to PC using
+// USB and FT232RL module.
 package main
 
 import (
@@ -38,7 +38,6 @@ func main() {
 	d, err := ftdi.OpenFirst(0x0403, 0x6001, ftdi.ChannelAny)
 	checkErr(err)
 
-	
 	checkErr(d.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
 	// nRF24L01+ SPI clock should be <= 8 MHz.
@@ -47,6 +46,8 @@ func main() {
 	// Theoretical max baudrate in one direction: 12 MBaud / 8 = 1500 kBaud.
 	// Use 1500 kBaud / 2 = 750 kBaud
 	checkErr(d.SetBaudrate(750e3 / 16))
+
+	checkErr(d.WriteByte(0))
 
 	time.Sleep(time.Hour)
 }
