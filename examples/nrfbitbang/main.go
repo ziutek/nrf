@@ -5,8 +5,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"time"
 
+	"github.com/ziutek/bitbang/spi"
 	"github.com/ziutek/ftdi"
 )
 
@@ -35,19 +35,41 @@ func checkErr(err error) {
 }
 
 func main() {
-	d, err := ftdi.OpenFirst(0x0403, 0x6001, ftdi.ChannelAny)
+	drv, err := ftdi.OpenFirst(0x0403, 0x6001, ftdi.ChannelAny)
 	checkErr(err)
 
-	checkErr(d.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
+	checkErr(drv.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
 	// nRF24L01+ SPI clock should be <= 8 MHz.
-	// FT232R max baudrate is 3 MBaud, USB speed is 12 Mb/s.
-	// Theoretical available USB speed is 12 Mb/s (sum in+out).
-	// Theoretical max baudrate in one direction: 12 MBaud / 8 = 1500 kBaud.
-	// Use 1500 kBaud / 2 = 750 kBaud
-	checkErr(d.SetBaudrate(750e3 / 16))
+	// FT232R max baudrate is 3 MBaud, USB speed is 12 Mb/s = 1500 kB/s..
+	// In best case: 1308 kB/s fdata + 192 kB/s overhead.
+	// Theoretical max baudrate in one direction: 1308 kBaud
+	// Use 750 kBaud (48 MHz clock divided by 64).
+	checkErr(drv.SetBaudrate(750e3 / 16))
 
-	checkErr(d.WriteByte(0))
+	checkErr(drv.WriteByte(SCK))
+	var buf [64]byte
+	n, err := drv.Read(buf[:])
+	checkErr(err)
+	fmt.Println(buf)
+	return
 
-	time.Sleep(time.Hour)
+	ma := spi.NewMaster(drv, SCK, MOSI, MISO)
+	cfg := spi.Config{
+		Mode:     spi.MSBF | spi.CPOL0 | spi.CPHA0,
+		FrameLen: 1,
+		Delay:    0,
+	}
+	ma.Configure(cfg)
+
+	// CSN is always zero (slave selected).
+
+	checkErr(ma.Begin(nil))
+	_, err = ma.WriteN(0xff, 1) // NOP
+	checkErr(err)
+	n, err = ma.Read(buf[:])
+	fmt.Println(buf[:n])
+	checkErr(err)
+	checkErr(ma.End(nil))
+
 }
