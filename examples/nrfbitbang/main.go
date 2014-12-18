@@ -47,12 +47,12 @@ func main() {
 	// Use 750 kBaud (48 MHz clock divided by 64).
 	checkErr(drv.SetBaudrate(750e3 / 16))
 
-	checkErr(drv.WriteByte(SCK))
+	/*checkErr(drv.WriteByte(SCK))
 	var buf [64]byte
 	n, err := drv.Read(buf[:])
 	checkErr(err)
-	fmt.Println(buf)
-	return
+	fmt.Println(buf[:n])
+	return*/
 
 	ma := spi.NewMaster(drv, SCK, MOSI, MISO)
 	cfg := spi.Config{
@@ -67,7 +67,8 @@ func main() {
 	checkErr(ma.Begin(nil))
 	_, err = ma.WriteN(0xff, 1) // NOP
 	checkErr(err)
-	n, err = ma.Read(buf[:])
+	var buf [64]byte
+	n, err := ma.Read(buf[:])
 	fmt.Println(buf[:n])
 	checkErr(err)
 	checkErr(ma.End(nil))
