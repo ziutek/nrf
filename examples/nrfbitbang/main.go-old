@@ -10,7 +10,6 @@ import (
 
 	"github.com/ziutek/bitbang/spi"
 	"github.com/ziutek/ftdi"
-	"github.com/ziutek/nrf"
 )
 
 // Connections (FT232RL -- nRF24L01+):
@@ -41,36 +40,7 @@ func checkErr(err error) {
 	die(err)
 }
 
-type spiDrv struct {
-	io.Reader
-	*bufio.Writer
-}
-
-type nrfDrv struct {
-	*spi.Master
-	ce, csn byte
-}
-
-func (d *nrfDrv) Enable(en bool) error {
-	var prePost, base byte
-	prePost = d.csn
-	if en {
-		prePost |= d.ce
-		base = d.ce
-	}
-	// Setup CSN, CE lines before and after conversation.
-	d.SetPrePost([]byte{prePost}, []byte{prePost})
-	// Setup CSN, CE line during conversation.
-	d.SetBase(base)
-	return nil
-}
-
-func newNrfDrv(ma *spi.Master, ce, csn byte) (*nrfDrv, error) {
-	d := &nrfDrv{Master: ma, ce: ce, csn: csn}
-	return d, d.Enable(false)
-}
-
-func setup(udev *ftdi.USBDev) nrf.Device {
+func setupSPI(udev *ftdi.USBDev) *spi.Master {
 	ft, err := ftdi.OpenUSBDev(udev, ftdi.ChannelAny)
 	checkErr(err)
 	checkErr(ft.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
@@ -82,10 +52,18 @@ func setup(udev *ftdi.USBDev) nrf.Device {
 	checkErr(ft.SetLatencyTimer(2))
 	checkErr(ft.PurgeBuffers())
 
+	type drv struct {
+		io.Reader
+		*bufio.Writer
+	}
 	ma := spi.NewMaster(
-		&spiDrv{ft, bufio.NewWriterSize(ft, cs)},
+		&drv{ft, bufio.NewWriterSize(ft, cs)},
 		SCK, MOSI, MISO,
 	)
+
+	// Set up CSN line (or lines) before and after conversation.
+	ma.SetPrePost([]byte{CSN}, []byte{CSN})
+
 	cfg := spi.Config{
 		Mode:     spi.MSBF | spi.CPOL0 | spi.CPHA0,
 		FrameLen: 1,
@@ -93,10 +71,7 @@ func setup(udev *ftdi.USBDev) nrf.Device {
 	}
 	ma.Configure(cfg)
 
-	drv, err := newNrfDrv(ma, CE, CSN)
-	checkErr(err)
-
-	return nrf.Device{drv}
+	return ma
 }
 
 func main() {
@@ -106,12 +81,15 @@ func main() {
 	if len(udevs) < 2 {
 		die("Need two devices but", len(udevs), "detected.")
 	}
-	A := setup(udevs[0])
-	B := setup(udevs[1])
+	A := setupSPI(udevs[0])
+	B := setupSPI(udevs[1])
 
-	for _, radio := range []nrf.Device{A, B} {
-		status, err := radio.NOP()
+	for _, ma := range []*spi.Master{A, B} {
+		// Set down CSN line for whole period of conversation.
+		ma.SetBase(0)
+		buf := []byte{0xff}
+		n, err := ma.WriteRead(buf, buf)
+		fmt.Println(buf[:n])
 		checkErr(err)
-		fmt.Println(status)
 	}
 }
