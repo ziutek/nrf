@@ -51,6 +51,24 @@ func (s Status) String() string {
 	)
 }
 
+// Reg invokes R_REGISTER command. It reads status byte and content of register
+// r into provided buffer buf. Before call buf[0] should contain register
+// address. After return buf[0] contains status byte, buf[1:] contains data
+// read. This is general command. Use specific Reg* commands instead.
+func (d Device) Reg(buf []byte) error {
+	buf[0] &= 0x1f
+	_, err := d.WriteRead(buf[:1], buf)
+	return err	
+}
+
+// Config returns content of STATUS and CONFIG register.
+func (d Device) Config() (Status, byte, error) {
+	buf := [2]byte{}
+	err := d.Reg(buf[:])
+	return Status(buf[0]), buf[1], err
+}
+
+// NOP invokes NOP command.
 func (d Device) NOP() (Status, error) {
 	buf := []byte{0xff}
 	_, err := d.WriteRead(buf, buf)

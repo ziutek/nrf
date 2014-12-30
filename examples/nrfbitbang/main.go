@@ -110,8 +110,21 @@ func main() {
 	B := setup(udevs[1])
 
 	for _, radio := range []nrf.Device{A, B} {
+		// NOP (read STATUS register)
 		status, err := radio.NOP()
 		checkErr(err)
 		fmt.Println(status)
+		// Read STATUS and RX_ADDR_P0
+		buf := [6]byte{0: 0xa}
+		checkErr(radio.Reg(buf[:]))
+		fmt.Println(buf)
+		// Read STATUS and RX_ADDR_P1
+		buf[0] = 0xb
+		checkErr(radio.Reg(buf[:]))
+		fmt.Println(buf)
+		// Read CONFIG
+		status, cfg, err := radio.Config()
+		checkErr(err)
+		fmt.Println(status, cfg)
 	}
 }
