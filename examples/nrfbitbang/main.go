@@ -52,17 +52,18 @@ type nrfDrv struct {
 }
 
 func (d *nrfDrv) Enable(en bool) error {
-	var prePost, base byte
-	prePost = d.csn
+	var base byte
+	prePost := []byte{d.csn}
 	if en {
-		prePost |= d.ce
+		prePost[0] |= d.ce
 		base = d.ce
 	}
 	// Setup CSN, CE lines before and after conversation.
-	d.SetPrePost([]byte{prePost}, []byte{prePost})
+	d.SetPrePost(prePost, prePost)
 	// Setup CSN, CE line during conversation.
 	d.SetBase(base)
-	return nil
+	_, err := d.WriteRead(prePost, nil)
+	return err
 }
 
 func newNrfDrv(ma *spi.Master, ce, csn byte) (*nrfDrv, error) {
@@ -99,6 +100,31 @@ func setup(udev *ftdi.USBDev) nrf.Device {
 	return nrf.Device{drv}
 }
 
+func info(radios []nrf.Device) {
+	for i, radio := range radios {
+		cfg, sta, err := radio.Config()
+		checkErr(err)
+		aa, _, err := radio.AA()
+		checkErr(err)
+		rae, _, err := radio.RxAddrEn()
+		checkErr(err)
+		aw, _, err := radio.AW()
+		checkErr(err)
+		cnt, dlyus, _, err := radio.Retr()
+		checkErr(err)
+		fmt.Printf(
+			"%c:\n"+
+				" Cfg: %s\n"+
+				" EnAA: %s\n"+
+				" EnRxAddr: %s\n"+
+				" AW: %d\n"+
+				" Retr: %d times, %d us\n"+
+				" Status: %s\n",
+			'A'+i, cfg, aa, rae, aw, cnt, dlyus, sta,
+		)
+	}
+}
+
 func main() {
 	udevs, err := ftdi.FindAll(0x0403, 0x6001)
 	checkErr(err)
@@ -108,23 +134,16 @@ func main() {
 	}
 	A := setup(udevs[0])
 	B := setup(udevs[1])
+	radios := []nrf.Device{A, B}
 
-	for _, radio := range []nrf.Device{A, B} {
-		// NOP (read STATUS register)
-		status, err := radio.NOP()
-		checkErr(err)
-		fmt.Println(status)
-		// Read STATUS and RX_ADDR_P0
-		buf := [6]byte{0: 0xa}
-		checkErr(radio.Reg(buf[:]))
-		fmt.Println(buf)
-		// Read STATUS and RX_ADDR_P1
-		buf[0] = 0xb
-		checkErr(radio.Reg(buf[:]))
-		fmt.Println(buf)
-		// Read CONFIG
-		status, cfg, err := radio.Config()
-		checkErr(err)
-		fmt.Println(status, cfg)
-	}
+	info(radios)
+	_, err = A.SetRetr(15, 500)
+	checkErr(err)
+	_, err = A.SetConfig(nrf.EnCRC | nrf.CRCO | nrf.PwrUp)
+	checkErr(err)
+	_, err = B.SetRetr(15, 500)
+	checkErr(err)
+	_, err = B.SetConfig(nrf.EnCRC | nrf.CRCO | nrf.PwrUp | nrf.PrimRx)
+	checkErr(err)
+	info(radios)
 }
