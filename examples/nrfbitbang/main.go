@@ -102,25 +102,90 @@ func setup(udev *ftdi.USBDev) nrf.Device {
 
 func info(radios []nrf.Device) {
 	for i, radio := range radios {
-		cfg, sta, err := radio.Config()
+		cfg, stat, err := radio.Cfg()
 		checkErr(err)
 		aa, _, err := radio.AA()
 		checkErr(err)
-		rae, _, err := radio.RxAddrEn()
+		rxae, _, err := radio.RxAE()
 		checkErr(err)
 		aw, _, err := radio.AW()
 		checkErr(err)
 		cnt, dlyus, _, err := radio.Retr()
 		checkErr(err)
+		ch, _, err := radio.Ch()
+		checkErr(err)
+		rf, _, err := radio.RF()
+		checkErr(err)
+		plos, arc, _, err := radio.TxCnt()
+		checkErr(err)
+		rpd, _, err := radio.RPD()
+		checkErr(err)
+		rpds := "< -64dBm"
+		if rpd {
+			rpds = "> -64dBm"
+		}
+		var a0, a1, txa [5]byte
+		_, err = radio.RxAddr(0, a0[:])
+		checkErr(err)
+		_, err = radio.RxAddr(1, a1[:])
+		checkErr(err)
+		a2, _, err := radio.RxAddr0(2)
+		checkErr(err)
+		a3, _, err := radio.RxAddr0(3)
+		checkErr(err)
+		a4, _, err := radio.RxAddr0(4)
+		checkErr(err)
+		a5, _, err := radio.RxAddr0(5)
+		checkErr(err)
+		_, err = radio.TxAddr(txa[:])
+		checkErr(err)
+		var pw [6]int
+		for i := range pw {
+			pw[i], _, err = radio.RxPW(i)
+			checkErr(err)
+		}
+		fifo, _, err := radio.FIFO()
+		checkErr(err)
+		dynpd, _, err := radio.DynPD()
+		checkErr(err)
+		feature, _, err := radio.Feature()
+		checkErr(err)
+
 		fmt.Printf(
-			"%c:\n"+
-				" Cfg: %s\n"+
-				" EnAA: %s\n"+
-				" EnRxAddr: %s\n"+
-				" AW: %d\n"+
-				" Retr: %d times, %d us\n"+
-				" Status: %s\n",
-			'A'+i, cfg, aa, rae, aw, cnt, dlyus, sta,
+			"Radio %c registers:\n"+
+				" Cfg:   %s\n"+
+				" AA:    %s\n"+
+				" RxAE:  %s\n"+
+				" AW:    %d\n"+
+				" Retr:  %d times, %d us\n"+
+				" Ch:    %d\n"+
+				" RF:    %s\n"+
+				" Stat:  %s\n"+
+				" TxCnt: %d pkt lost, %d retr\n"+
+				" RPD:   %t (%s)\n"+
+				" Addr0: %x\n"+
+				" Addr1: %x\n"+
+				" Addr2: %x\n"+
+				" Addr3: %x\n"+
+				" Addr4: %x\n"+
+				" Addr5: %x\n"+
+				" TxAddr:%x\n",
+			'A'+i,
+			cfg, aa, rxae, aw,
+			cnt, dlyus,
+			ch, rf, stat,
+			plos, arc,
+			rpd, rpds,
+			a0, a1, a2, a3, a4, a5, txa,
+		)
+		for i, pw := range pw {
+			fmt.Printf(" PW%d:   %d\n", i, pw)
+		}
+		fmt.Printf(
+			" FIFO:  %s\n"+
+				" DynPD: %s\n"+
+				" Fature:%s\n",
+			fifo, dynpd, feature,
 		)
 	}
 }
@@ -136,14 +201,45 @@ func main() {
 	B := setup(udevs[1])
 	radios := []nrf.Device{A, B}
 
+	fmt.Println("\nBefore configuration\n")
 	info(radios)
-	_, err = A.SetRetr(15, 500)
+
+	cfg := nrf.EnCRC | nrf.CRCO | nrf.PwrUp
+	future := nrf.DPL
+	rf := nrf.DRLow | nrf.Pwr(-18)
+	retr := 15
+	var dlyus int
+	if future&nrf.AckPay != 0 {
+		if rf&nrf.DRLow != 0 {
+			dlyus = 1500
+		} else {
+			dlyus = 500
+		}
+	} else {
+		if rf&nrf.DRLow != 0 {
+			dlyus = 500
+		} else {
+			dlyus = 250
+		}
+	}
+
+	for _, radio := range radios {
+		_, err = radio.SetRF(rf)
+		checkErr(err)
+		_, err = radio.SetRetr(retr, dlyus)
+		checkErr(err)
+		_, err = radio.SetFeature(future)
+		checkErr(err)
+		_, err = radio.SetDynPD(nrf.PAll)
+		checkErr(err)
+		_, err = radio.SetRxAE(nrf.P0)
+		checkErr(err)
+	}
+	_, err = A.SetCfg(cfg)
 	checkErr(err)
-	_, err = A.SetConfig(nrf.EnCRC | nrf.CRCO | nrf.PwrUp)
+	_, err = B.SetCfg(cfg | nrf.PrimRx)
 	checkErr(err)
-	_, err = B.SetRetr(15, 500)
-	checkErr(err)
-	_, err = B.SetConfig(nrf.EnCRC | nrf.CRCO | nrf.PwrUp | nrf.PrimRx)
-	checkErr(err)
+
+	fmt.Println("\nAfter configuration\n")
 	info(radios)
 }
