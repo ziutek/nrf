@@ -6,10 +6,10 @@ type Driver interface {
 	// WriteRead perform SPI conversation (see bitbang/spi package).
 	WriteRead(oi ...[]byte) (n int, err error)
 	// Set CE line.
-	Enable(bool) error
+	SetCE(bool) error
 }
 
-// Device wraps driver to provide interface to nRF24L01+ transceiver.
+// Device wraps driver to provide interface to nRF24L01(+) transceiver.
 type Device struct {
 	Driver
 }

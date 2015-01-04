@@ -1,5 +1,5 @@
-// nrfbitbang is example how to use nRF24L01+ transceiver connected to PC using
-// USB and FT232RL module.
+// nrfbitbang shows how to use nRF24L01+ transceiver connected to PC using USB
+// and FT232RL module.
 package main
 
 import (
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/ziutek/bitbang/spi"
 	"github.com/ziutek/ftdi"
@@ -20,6 +21,8 @@ import (
 // CTS (DBUS3) -- MOSI
 // DTR (DBUS4) -- CE
 // DSR (DBUS5) -- CSN
+// GNF         -- GND
+// 3V3         -- VCC (decoupling required)
 const (
 	MISO = 0x01
 	IRQ  = 0x02
@@ -42,8 +45,30 @@ func checkErr(err error) {
 }
 
 type spiDrv struct {
-	io.Reader
-	*bufio.Writer
+	debug bool
+	r     io.Reader
+	w     *bufio.Writer
+}
+
+func (d *spiDrv) Read(b []byte) (int, error) {
+	if d.debug {
+		defer fmt.Printf("spiread: %x\n", b)
+	}
+	return d.r.Read(b)
+}
+
+func (d *spiDrv) Write(b []byte) (int, error) {
+	if d.debug {
+		fmt.Printf("spiwrite: %x\n", b)
+	}
+	return d.w.Write(b)
+}
+
+func (d *spiDrv) Flush() error {
+	if d.debug {
+		fmt.Println("spiflush")
+	}
+	return d.w.Flush()
 }
 
 type nrfDrv struct {
@@ -51,40 +76,53 @@ type nrfDrv struct {
 	ce, csn byte
 }
 
-func (d *nrfDrv) Enable(en bool) error {
-	var base byte
-	prePost := []byte{d.csn}
-	if en {
-		prePost[0] |= d.ce
-		base = d.ce
+// Enable(true);Enable(false) sets CE bit for period of 3 bit-bang symbols.
+// If you need such sequence set bit-bang baudrate < 3 sym / 10 us = 300000 Baud
+// to satisfy nRF24L01(+) timing or wait enough between calls.
+func (d *nrfDrv) SetCE(up bool) error {
+	var ce byte
+	if up {
+		ce = d.ce
 	}
+	base := d.csn | ce
+	prePost := []byte{base}
 	// Setup CSN, CE lines before and after conversation.
 	d.SetPrePost(prePost, prePost)
-	// Setup CSN, CE line during conversation.
+	// Setup CSN, CE lines during conversation.
 	d.SetBase(base)
-	_, err := d.WriteRead(prePost, nil)
+
+	// This bit-bangs []byte{base, base, base}.
+	_, err := d.WriteRead()
+	if err == nil {
+		err = d.Flush()
+	}
+
+	// Clear CSN in base.
+	d.SetBase(ce)
+
 	return err
 }
 
 func newNrfDrv(ma *spi.Master, ce, csn byte) (*nrfDrv, error) {
 	d := &nrfDrv{Master: ma, ce: ce, csn: csn}
-	return d, d.Enable(false)
+	return d, d.SetCE(false)
 }
 
-func setup(udev *ftdi.USBDev) nrf.Device {
+func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
 	ft, err := ftdi.OpenUSBDev(udev, ftdi.ChannelAny)
 	checkErr(err)
 	checkErr(ft.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
-	checkErr(ft.SetBaudrate(512 * 1024 / 16))
+	checkErr(ft.SetBaudrate(300 * 1024 / 16))
 	const cs = 4096
 	checkErr(ft.SetReadChunkSize(cs))
 	checkErr(ft.SetWriteChunkSize(cs))
 	checkErr(ft.SetLatencyTimer(2))
 	checkErr(ft.PurgeBuffers())
 
+	spid := &spiDrv{r: ft, w: bufio.NewWriterSize(ft, cs)}
 	ma := spi.NewMaster(
-		&spiDrv{ft, bufio.NewWriterSize(ft, cs)},
+		spid,
 		SCK, MOSI, MISO,
 	)
 	cfg := spi.Config{
@@ -94,10 +132,10 @@ func setup(udev *ftdi.USBDev) nrf.Device {
 	}
 	ma.Configure(cfg)
 
-	drv, err := newNrfDrv(ma, CE, CSN)
+	nrfd, err := newNrfDrv(ma, CE, CSN)
 	checkErr(err)
 
-	return nrf.Device{drv}
+	return nrf.Device{nrfd}, spid
 }
 
 func info(radios []nrf.Device) {
@@ -190,6 +228,14 @@ func info(radios []nrf.Device) {
 	}
 }
 
+func txInfo(radio nrf.Device) {
+	plos, arc, stat, err := radio.TxCnt()
+	checkErr(err)
+	fifo, _, err := radio.FIFO()
+	checkErr(err)
+	fmt.Println("Tx:", stat, "loss:", plos, "retr:", arc, "\n   ", fifo)
+}
+
 func main() {
 	udevs, err := ftdi.FindAll(0x0403, 0x6001)
 	checkErr(err)
@@ -197,8 +243,8 @@ func main() {
 	if len(udevs) < 2 {
 		die("Need two devices but", len(udevs), "detected.")
 	}
-	A := setup(udevs[0])
-	B := setup(udevs[1])
+	A, _ := setup(udevs[0])
+	B, _ := setup(udevs[1])
 	radios := []nrf.Device{A, B}
 
 	fmt.Println("\nBefore configuration\n")
@@ -206,7 +252,8 @@ func main() {
 
 	cfg := nrf.EnCRC | nrf.CRCO | nrf.PwrUp
 	future := nrf.DPL
-	rf := nrf.DRLow | nrf.Pwr(-18)
+	ch := 125 // max. 125
+	rf := nrf.LNAHC | nrf.DRLow | nrf.Pwr(-18)
 	retr := 15
 	var dlyus int
 	if future&nrf.AckPay != 0 {
@@ -226,6 +273,8 @@ func main() {
 	for _, radio := range radios {
 		_, err = radio.SetRF(rf)
 		checkErr(err)
+		_, err = radio.SetCh(ch)
+		checkErr(err)
 		_, err = radio.SetRetr(retr, dlyus)
 		checkErr(err)
 		_, err = radio.SetFeature(future)
@@ -242,4 +291,64 @@ func main() {
 
 	fmt.Println("\nAfter configuration\n")
 	info(radios)
+
+	fmt.Println("\nTransmision\n")
+
+	go func() {
+		time.Sleep(time.Second)
+		checkErr(A.SetCE(true))
+		_, err = A.WriteTxP([]byte{0: 1, 3: 1})
+		checkErr(err)
+		time.Sleep(time.Second)
+		txInfo(A)
+
+		_, err = A.WriteTxP([]byte{1})
+		checkErr(err)
+		checkErr(A.SetCE(false))
+		time.Sleep(time.Second)
+		txInfo(A)
+
+		_, err = A.FlushTx()
+		checkErr(err)
+		_, err = A.WriteTxP(nil)
+		checkErr(err)
+		_, err = A.WriteTxP(nil)
+		checkErr(err)
+		_, err = A.WriteTxP(nil)
+		checkErr(err)
+
+		_, err = A.ReuseTxP()
+		checkErr(err)
+		checkErr(A.SetCE(true))
+		checkErr(A.SetCE(false))
+		time.Sleep(time.Second)
+		txInfo(A)
+		checkErr(A.SetCE(true))
+		checkErr(A.SetCE(false))
+		time.Sleep(time.Second)
+		txInfo(A)
+	}()
+
+	checkErr(B.SetCE(true))
+	var buf [32]byte
+	for {
+		plen, stat, err := B.RxPLen()
+		checkErr(err)
+		if plen > 32 {
+			fmt.Println("B: ", plen, "> 32")
+			_, err = B.FlushRx()
+			checkErr(err)
+			continue
+		}
+		if stat&nrf.RxDR != 0 {
+			fmt.Println("B: ", stat, "Plen:", plen)
+			checkErr(err)
+			_, err = B.ReadRxP(buf[:plen])
+			checkErr(err)
+			_, err = B.Clear(nrf.RxDR)
+			checkErr(err)
+			fmt.Println("B: ", buf[:plen])
+
+		}
+	}
 }
