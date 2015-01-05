@@ -113,7 +113,7 @@ func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
 	checkErr(err)
 	checkErr(ft.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
-	checkErr(ft.SetBaudrate(300 * 1024 / 16))
+	checkErr(ft.SetBaudrate(512 * 1024 / 16))
 	const cs = 4096
 	checkErr(ft.SetReadChunkSize(cs))
 	checkErr(ft.SetWriteChunkSize(cs))
@@ -243,8 +243,8 @@ func main() {
 	if len(udevs) < 2 {
 		die("Need two devices but", len(udevs), "detected.")
 	}
-	A, _ := setup(udevs[0])
-	B, _ := setup(udevs[1])
+	A, _ := setup(udevs[1])
+	B, _ := setup(udevs[0])
 	radios := []nrf.Device{A, B}
 
 	fmt.Println("\nBefore configuration\n")
@@ -295,38 +295,26 @@ func main() {
 	fmt.Println("\nTransmision\n")
 
 	go func() {
-		time.Sleep(time.Second)
 		checkErr(A.SetCE(true))
-		_, err = A.WriteTxP([]byte{0: 1, 3: 1})
-		checkErr(err)
-		time.Sleep(time.Second)
-		txInfo(A)
+		for {
+			_, err = A.WriteTxP([]byte{0: 1, 31: 3})
+			checkErr(err)
+			time.Sleep(time.Second)
+			txInfo(A)
+		}
 
-		_, err = A.WriteTxP([]byte{1})
-		checkErr(err)
-		checkErr(A.SetCE(false))
-		time.Sleep(time.Second)
-		txInfo(A)
-
-		_, err = A.FlushTx()
-		checkErr(err)
-		_, err = A.WriteTxP(nil)
-		checkErr(err)
-		_, err = A.WriteTxP(nil)
-		checkErr(err)
-		_, err = A.WriteTxP(nil)
-		checkErr(err)
-
-		_, err = A.ReuseTxP()
-		checkErr(err)
-		checkErr(A.SetCE(true))
-		checkErr(A.SetCE(false))
-		time.Sleep(time.Second)
-		txInfo(A)
-		checkErr(A.SetCE(true))
-		checkErr(A.SetCE(false))
-		time.Sleep(time.Second)
-		txInfo(A)
+		/*
+			_, err = A.ReuseTxP()
+			checkErr(err)
+			checkErr(A.SetCE(true))
+			checkErr(A.SetCE(false))
+			time.Sleep(time.Second)
+			txInfo(A)
+			checkErr(A.SetCE(true))
+			checkErr(A.SetCE(false))
+			time.Sleep(time.Second)
+			txInfo(A)
+		*/
 	}()
 
 	checkErr(B.SetCE(true))
