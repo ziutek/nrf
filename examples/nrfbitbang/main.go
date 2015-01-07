@@ -113,7 +113,7 @@ func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
 	checkErr(err)
 	checkErr(ft.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
-	checkErr(ft.SetBaudrate(512 * 1024 / 16))
+	checkErr(ft.SetBaudrate(8 * 1024 / 16))
 	const cs = 4096
 	checkErr(ft.SetReadChunkSize(cs))
 	checkErr(ft.SetWriteChunkSize(cs))
@@ -228,14 +228,6 @@ func info(radios []nrf.Device) {
 	}
 }
 
-func txInfo(radio nrf.Device) {
-	plos, arc, stat, err := radio.TxCnt()
-	checkErr(err)
-	fifo, _, err := radio.FIFO()
-	checkErr(err)
-	fmt.Println("Tx:", stat, "loss:", plos, "retr:", arc, "\n   ", fifo)
-}
-
 func main() {
 	udevs, err := ftdi.FindAll(0x0403, 0x6001)
 	checkErr(err)
@@ -243,8 +235,8 @@ func main() {
 	if len(udevs) < 2 {
 		die("Need two devices but", len(udevs), "detected.")
 	}
-	A, _ := setup(udevs[1])
-	B, _ := setup(udevs[0])
+	A, _ := setup(udevs[0])
+	B, _ := setup(udevs[1])
 	radios := []nrf.Device{A, B}
 
 	fmt.Println("\nBefore configuration\n")
@@ -254,6 +246,7 @@ func main() {
 	future := nrf.DPL
 	ch := 125 // max. 125
 	rf := nrf.LNAHC | nrf.DRLow | nrf.Pwr(-18)
+	//rf := nrf.LNAHC | nrf.Pwr(-18)
 	retr := 15
 	var dlyus int
 	if future&nrf.AckPay != 0 {
@@ -295,12 +288,46 @@ func main() {
 	fmt.Println("\nTransmision\n")
 
 	go func() {
-		checkErr(A.SetCE(true))
-		for {
-			_, err = A.WriteTxP([]byte{0: 1, 31: 3})
+		time.Sleep(time.Second)
+		var (
+			buf  [32]byte
+			lost int
+		)
+		for k := 0; ; k++ {
+			_, err := A.WriteTxP(buf[:])
 			checkErr(err)
-			time.Sleep(time.Second)
-			txInfo(A)
+			checkErr(A.SetCE(true))
+			checkErr(A.SetCE(false))
+
+			buf[31]++
+			for i := 31; i > 0; i-- {
+				if buf[i] < 10 {
+					break
+				}
+				buf[i] = 0
+				buf[i-1]++
+			}
+
+			for i := 0; ; i++ {
+				fifo, stat, err := A.FIFO()
+				checkErr(err)
+				if i&0xff == 0 {
+					fmt.Println("A:", lost, "/", k, stat, fifo)
+				}
+				if stat&nrf.MaxRT != 0 {
+					_, err := A.Clear(nrf.MaxRT)
+					checkErr(err)
+					_, err = A.FlushTx()
+					checkErr(err)
+					lost++
+					break
+				}
+				if stat&nrf.FullTx == 0 {
+					break
+				}
+				_, err = A.FlushRx()
+				checkErr(err)
+			}
 		}
 
 		/*
@@ -309,17 +336,14 @@ func main() {
 			checkErr(A.SetCE(true))
 			checkErr(A.SetCE(false))
 			time.Sleep(time.Second)
-			txInfo(A)
 			checkErr(A.SetCE(true))
 			checkErr(A.SetCE(false))
-			time.Sleep(time.Second)
-			txInfo(A)
 		*/
 	}()
 
 	checkErr(B.SetCE(true))
 	var buf [32]byte
-	for {
+	for i := 0; ; i++ {
 		plen, stat, err := B.RxPLen()
 		checkErr(err)
 		if plen > 32 {
@@ -328,7 +352,9 @@ func main() {
 			checkErr(err)
 			continue
 		}
-		if stat&nrf.RxDR != 0 {
+		fifo, stat, err := B.FIFO()
+		checkErr(err)
+		if fifo&nrf.RxEmpty == 0 {
 			fmt.Println("B: ", stat, "Plen:", plen)
 			checkErr(err)
 			_, err = B.ReadRxP(buf[:plen])
@@ -336,7 +362,8 @@ func main() {
 			_, err = B.Clear(nrf.RxDR)
 			checkErr(err)
 			fmt.Println("B: ", buf[:plen])
-
+		} else if i&0xff == 0 {
+			fmt.Println("B: ", stat, fifo)
 		}
 	}
 }
