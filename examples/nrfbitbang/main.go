@@ -113,7 +113,7 @@ func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
 	checkErr(err)
 	checkErr(ft.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
-	checkErr(ft.SetBaudrate(8 * 1024 / 16))
+	checkErr(ft.SetBaudrate(256 * 1024 / 16))
 	const cs = 4096
 	checkErr(ft.SetReadChunkSize(cs))
 	checkErr(ft.SetWriteChunkSize(cs))
@@ -288,13 +288,13 @@ func main() {
 	fmt.Println("\nTransmision\n")
 
 	go func() {
-		time.Sleep(time.Second)
 		var (
 			buf  [32]byte
 			lost int
 		)
+		time.Sleep(100 * time.Millisecond)
 		for k := 0; ; k++ {
-			_, err := A.WriteTxP(buf[:])
+			_, err = A.WriteTxP(buf[:])
 			checkErr(err)
 			checkErr(A.SetCE(true))
 			checkErr(A.SetCE(false))
@@ -309,24 +309,30 @@ func main() {
 			}
 
 			for i := 0; ; i++ {
-				fifo, stat, err := A.FIFO()
+				stat, err := A.NOP()
 				checkErr(err)
 				if i&0xff == 0 {
-					fmt.Println("A:", lost, "/", k, stat, fifo)
+					fmt.Println("A:", lost, "/", k, stat)
+				}
+				if stat&nrf.RxDR != 0 {
+					_, err := A.FlushRx()
+					checkErr(err)
+					_, err = A.Clear(nrf.RxDR)
+					checkErr(err)
 				}
 				if stat&nrf.MaxRT != 0 {
-					_, err := A.Clear(nrf.MaxRT)
-					checkErr(err)
 					_, err = A.FlushTx()
 					checkErr(err)
 					lost++
+					_, err := A.Clear(nrf.MaxRT | nrf.TxDS)
+					checkErr(err)
 					break
 				}
-				if stat&nrf.FullTx == 0 {
+				if stat&nrf.TxDS != 0 {
+					_, err := A.Clear(nrf.TxDS)
+					checkErr(err)
 					break
 				}
-				_, err = A.FlushRx()
-				checkErr(err)
 			}
 		}
 
@@ -352,9 +358,7 @@ func main() {
 			checkErr(err)
 			continue
 		}
-		fifo, stat, err := B.FIFO()
-		checkErr(err)
-		if fifo&nrf.RxEmpty == 0 {
+		if stat&nrf.RxDR != 0 {
 			fmt.Println("B: ", stat, "Plen:", plen)
 			checkErr(err)
 			_, err = B.ReadRxP(buf[:plen])
@@ -363,7 +367,7 @@ func main() {
 			checkErr(err)
 			fmt.Println("B: ", buf[:plen])
 		} else if i&0xff == 0 {
-			fmt.Println("B: ", stat, fifo)
+			fmt.Println("B: ", stat)
 		}
 	}
 }
