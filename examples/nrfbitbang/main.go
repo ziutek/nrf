@@ -5,7 +5,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -46,7 +45,7 @@ func checkErr(err error) {
 
 type spiDrv struct {
 	debug bool
-	r     io.Reader
+	r     *ftdi.Device
 	w     *bufio.Writer
 }
 
@@ -62,6 +61,11 @@ func (d *spiDrv) Write(b []byte) (int, error) {
 		fmt.Printf("spiwrite: %x\n", b)
 	}
 	return d.w.Write(b)
+}
+
+func (d *spiDrv) IRQ() (bool, error) {
+	b, err := d.r.Pins()
+	return b&IRQ == 0, err
 }
 
 func (d *spiDrv) Flush() error {
@@ -231,12 +235,14 @@ func info(radios []nrf.Device) {
 func main() {
 	udevs, err := ftdi.FindAll(0x0403, 0x6001)
 	checkErr(err)
-
+	for i, udev := range udevs {
+		fmt.Printf("%c: %s\n", 'A'+i, udev.Serial)
+	}
 	if len(udevs) < 2 {
 		die("Need two devices but", len(udevs), "detected.")
 	}
-	A, _ := setup(udevs[0])
-	B, _ := setup(udevs[1])
+	A, spiA := setup(udevs[0])
+	B, spiB := setup(udevs[1])
 	radios := []nrf.Device{A, B}
 
 	fmt.Println("\nBefore configuration\n")
@@ -262,7 +268,6 @@ func main() {
 			dlyus = 250
 		}
 	}
-
 	for _, radio := range radios {
 		_, err = radio.SetRF(rf)
 		checkErr(err)
@@ -272,7 +277,9 @@ func main() {
 		checkErr(err)
 		_, err = radio.SetFeature(future)
 		checkErr(err)
-		_, err = radio.SetDynPD(nrf.PAll)
+		_, err = radio.SetDynPD(nrf.P0)
+		checkErr(err)
+		_, err = radio.SetAA(nrf.P0)
 		checkErr(err)
 		_, err = radio.SetRxAE(nrf.P0)
 		checkErr(err)
@@ -292,8 +299,9 @@ func main() {
 			buf  [32]byte
 			lost int
 		)
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(time.Second)
 		for k := 0; ; k++ {
+			time.Sleep(500 * time.Millisecond)
 			_, err = A.WriteTxP(buf[:])
 			checkErr(err)
 			checkErr(A.SetCE(true))
@@ -309,63 +317,83 @@ func main() {
 			}
 
 			for i := 0; ; i++ {
+				for {
+					irq, err := spiA.IRQ()
+					checkErr(err)
+					if irq {
+						break
+					}
+				}
 				stat, err := A.NOP()
 				checkErr(err)
 				if i&0xff == 0 {
-					fmt.Println("A:", lost, "/", k, stat)
+					fmt.Println("A lost:", lost, "/", k+i, stat)
 				}
 				if stat&nrf.RxDR != 0 {
+					fmt.Println("!A: RxDR")
 					_, err := A.FlushRx()
 					checkErr(err)
 					_, err = A.Clear(nrf.RxDR)
 					checkErr(err)
-				}
-				if stat&nrf.MaxRT != 0 {
-					_, err = A.FlushTx()
-					checkErr(err)
-					lost++
-					_, err := A.Clear(nrf.MaxRT | nrf.TxDS)
-					checkErr(err)
-					break
 				}
 				if stat&nrf.TxDS != 0 {
 					_, err := A.Clear(nrf.TxDS)
 					checkErr(err)
 					break
 				}
+				if stat&nrf.MaxRT != 0 {
+					fmt.Println("A: MaxRT")
+					_, err = A.FlushTx()
+					checkErr(err)
+					_, err = A.Clear(nrf.MaxRT)
+					checkErr(err)
+					lost++
+					break
+				}
 			}
 		}
-
-		/*
-			_, err = A.ReuseTxP()
-			checkErr(err)
-			checkErr(A.SetCE(true))
-			checkErr(A.SetCE(false))
-			time.Sleep(time.Second)
-			checkErr(A.SetCE(true))
-			checkErr(A.SetCE(false))
-		*/
 	}()
 
 	checkErr(B.SetCE(true))
 	var buf [32]byte
 	for i := 0; ; i++ {
-		plen, stat, err := B.RxPLen()
-		checkErr(err)
-		if plen > 32 {
-			fmt.Println("B: ", plen, "> 32")
-			_, err = B.FlushRx()
+		for {
+			irq, err := spiB.IRQ()
 			checkErr(err)
-			continue
+			//fmt.Println("B irq:", irq)
+			if irq {
+				break
+			}
+		}
+		plen, stat, err := B.RxPLen()
+		fmt.Println("B:", stat, plen)
+		checkErr(err)
+		if stat&nrf.MaxRT != 0 {
+			fmt.Println("!B: MaxRT")
+			_, err = B.FlushTx()
+			checkErr(err)
+			_, err := B.Clear(nrf.MaxRT)
+			checkErr(err)
+		}
+		if stat&nrf.TxDS != 0 {
+			fmt.Println("!B: TxDS")
+			_, err := B.Clear(nrf.TxDS)
+			checkErr(err)
 		}
 		if stat&nrf.RxDR != 0 {
-			fmt.Println("B: ", stat, "Plen:", plen)
-			checkErr(err)
-			_, err = B.ReadRxP(buf[:plen])
-			checkErr(err)
+			if plen > 32 {
+				fmt.Println("B: ", plen, "> 32")
+				_, err = B.FlushRx()
+				checkErr(err)
+			} else {
+				fmt.Println("B: ", stat, "Plen:", plen)
+				checkErr(err)
+				_, err = B.ReadRxP(buf[:plen])
+				checkErr(err)
+				fmt.Println("B: ", buf[:plen])
+			}
 			_, err = B.Clear(nrf.RxDR)
 			checkErr(err)
-			fmt.Println("B: ", buf[:plen])
 		} else if i&0xff == 0 {
 			fmt.Println("B: ", stat)
 		}
