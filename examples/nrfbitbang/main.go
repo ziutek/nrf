@@ -37,7 +37,6 @@ const (
 
 func die(a ...interface{}) {
 	fmt.Fprintln(os.Stderr, a...)
-	panic(a)
 }
 
 func checkErr(err error) {
@@ -315,13 +314,13 @@ func main() {
 
 	go func() {
 		//spiA.debug = true
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 		var (
 			buf  [32]byte
 			lost int
 		)
-		for k := 0; ; k++ {
-			//time.Sleep(100 * time.Millisecond)
+		for n := 0; ; n++ {
+			time.Sleep(100 * time.Millisecond)
 			_, err = A.WriteTxP(buf[:])
 			checkErr(err)
 			checkErr(A.SetCE(true))
@@ -345,31 +344,21 @@ func main() {
 			}
 			stat, err := A.NOP()
 			checkErr(err)
-			if stat&nrf.TxDS != 0 {
-				_, err := A.Clear(nrf.TxDS)
-				checkErr(err)
-			}
 			if stat&nrf.MaxRT != 0 {
-				fmt.Println("A: MaxRT")
-				_, err = A.Clear(nrf.MaxRT)
-				checkErr(err)
-				_, err = A.FlushTx()
-				checkErr(err)
+				isrMaxRT(A, "A")
 				lost++
 			}
-			if stat&nrf.RxDR != 0 {
-				fmt.Println("!A: RxDR")
-				_, err = A.Clear(nrf.RxDR)
-				checkErr(err)
-				_, err := A.FlushRx()
-				checkErr(err)
+			if stat&nrf.TxDS != 0 {
+				isrTxDS(A, "A", n, lost)
 			}
-			fmt.Println("A lost:", lost, "/", k, stat)
+			if stat&nrf.RxDR != 0 {
+				isrRxDR(B, "!B")
+			}
 		}
 	}()
 
 	//spiB.debug = true
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 	checkErr(B.SetCE(true))
 	for {
 		irq, err := spiB.IRQ()
@@ -377,13 +366,13 @@ func main() {
 		if !irq {
 			continue
 		}
-		stat, err := ma.NOP()
+		stat, err := B.NOP()
 		checkErr(err)
 		if stat&nrf.MaxRT != 0 {
-			isrMaxRT(B, "B")
+			isrMaxRT(B, "!B")
 		}
 		if stat&nrf.TxDS != 0 {
-			isrTxDS(B, "B")
+			isrTxDS(B, "!B", -1, -1)
 		}
 		if stat&nrf.RxDR != 0 {
 			isrRxDR(B, "B")
@@ -392,24 +381,23 @@ func main() {
 }
 
 func isrMaxRT(dev nrf.Device, name string) {
-	_, err := dev.Clear(nrf.MaxRT)
+	_, err := dev.FlushTx()
 	checkErr(err)
-	_, err = dev.FlushTx()
+	stat, err := dev.Clear(nrf.MaxRT)
 	checkErr(err)
-	fmt.Print(name, ": MaxRT\n")
-
+	fmt.Printf("%s: MaxRT %s\n", name, stat)
 }
 
-func isrTxDS(dev nrf.Device, name string) {
+func isrTxDS(dev nrf.Device, name string, n, lost int) {
 	_, err := dev.Clear(nrf.TxDS)
 	checkErr(err)
-	fmt.Print(name, ": TxDS\n")
+	fmt.Printf("%s: TxDS n=%d lost=%d\n", name, n, lost)
 }
 
 func isrRxDR(dev nrf.Device, name string) {
 	var buf [32]byte
 	for {
-		_, err = dev.Clear(nrf.RxDR)
+		_, err := dev.Clear(nrf.RxDR)
 		checkErr(err)
 		plen, stat, err := dev.RxPLen()
 		checkErr(err)
@@ -420,11 +408,11 @@ func isrRxDR(dev nrf.Device, name string) {
 		} else {
 			_, err = dev.ReadRxP(buf[:plen])
 			checkErr(err)
-			fmt.Printf("%s: pipe=%d %v", name, stat.RxPipe(), buf[:plen])
+			fmt.Printf("%s: pipe=%d %v\n", name, stat.RxPipe(), buf[:plen])
 		}
 		fifo, _, err := dev.FIFO()
 		checkErr(err)
-		if fifo&RxEmpty != 0 {
+		if fifo&nrf.RxEmpty != 0 {
 			break
 		}
 	}
