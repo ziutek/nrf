@@ -37,6 +37,7 @@ const (
 
 func die(a ...interface{}) {
 	fmt.Fprintln(os.Stderr, a...)
+	os.Exit(1)
 }
 
 func checkErr(err error) {
@@ -269,8 +270,9 @@ func main() {
 	cfg := nrf.EnCRC | nrf.CRCO | nrf.PwrUp
 	future := nrf.DPL
 	ch := 125 // max. 125
-	//rf := nrf.LNAHC | nrf.DRLow | nrf.Pwr(-18)
-	rf := nrf.LNAHC | nrf.Pwr(-18)
+	rf := nrf.LNAHC | nrf.DRLow | nrf.Pwr(-18)
+	//rf := nrf.LNAHC | nrf.Pwr(-12)
+	//rf := nrf.LNAHC | nrf.DRHigh | nrf.Pwr(-6)
 	retr := 15
 	var dlyus int
 	if future&nrf.AckPay != 0 {
@@ -295,11 +297,11 @@ func main() {
 		checkErr(err)
 		_, err = radio.SetRetr(retr, dlyus)
 		checkErr(err)
-		_, err = radio.SetDynPD(nrf.PAll)
+		_, err = radio.SetDynPD(nrf.P0)
 		checkErr(err)
-		_, err = radio.SetAA(nrf.PAll)
+		_, err = radio.SetAA(nrf.P0)
 		checkErr(err)
-		_, err = radio.SetRxAE(nrf.PAll)
+		_, err = radio.SetRxAE(nrf.P0)
 		checkErr(err)
 	}
 	_, err = A.SetCfg(cfg)
@@ -314,17 +316,19 @@ func main() {
 
 	go func() {
 		//spiA.debug = true
-		time.Sleep(5 * time.Millisecond)
 		var (
 			buf  [32]byte
 			lost int
 		)
+		time.Sleep(5 * time.Millisecond)
+		checkErr(A.SetCE(true))
 		for n := 0; ; n++ {
-			time.Sleep(100 * time.Millisecond)
 			_, err = A.WriteTxP(buf[:])
 			checkErr(err)
-			checkErr(A.SetCE(true))
-			checkErr(A.SetCE(false))
+			// Don't use CE pulse. For high packet rate it randomly blocks AA in
+			// PTX (status: RxDR- TxDS- MaxRT+ FullTx+, RxPipe:3, Tx FIFO can't
+			// be flushed, MaxRT can't be cleared, pipe 3 is disabled). This can
+			// be bug in this software (that I can't find it) or bug in silicon.
 
 			buf[31]++
 			for i := 31; i > 0; i-- {
@@ -352,7 +356,7 @@ func main() {
 				isrTxDS(A, "A", n, lost)
 			}
 			if stat&nrf.RxDR != 0 {
-				isrRxDR(B, "!B")
+				isrRxDR(A, "!A")
 			}
 		}
 	}()
@@ -381,9 +385,11 @@ func main() {
 }
 
 func isrMaxRT(dev nrf.Device, name string) {
-	_, err := dev.FlushTx()
+	_, err := dev.Clear(nrf.MaxRT)
 	checkErr(err)
-	stat, err := dev.Clear(nrf.MaxRT)
+	_, err = dev.FlushTx()
+	checkErr(err)
+	stat, err := dev.NOP()
 	checkErr(err)
 	fmt.Printf("%s: MaxRT %s\n", name, stat)
 }
@@ -397,12 +403,10 @@ func isrTxDS(dev nrf.Device, name string, n, lost int) {
 func isrRxDR(dev nrf.Device, name string) {
 	var buf [32]byte
 	for {
-		_, err := dev.Clear(nrf.RxDR)
-		checkErr(err)
 		plen, stat, err := dev.RxPLen()
 		checkErr(err)
 		if plen > 32 {
-			fmt.Printf("%s: pipe=%d plen=%d>32\n", name, stat.RxPipe(), plen, "> 32")
+			fmt.Printf("%s: pipe=%d plen=%d>32\n", name, stat.RxPipe(), plen)
 			_, err = dev.FlushRx()
 			checkErr(err)
 		} else {
@@ -410,6 +414,8 @@ func isrRxDR(dev nrf.Device, name string) {
 			checkErr(err)
 			fmt.Printf("%s: pipe=%d %v\n", name, stat.RxPipe(), buf[:plen])
 		}
+		_, err = dev.Clear(nrf.RxDR)
+		checkErr(err)
 		fifo, _, err := dev.FIFO()
 		checkErr(err)
 		if fifo&nrf.RxEmpty != 0 {
