@@ -14,26 +14,30 @@ import (
 )
 
 // Connections (FT232RL -- nRF24L01+):
-// TxD (DBUS0) -- MISO
-// RxD (DBUS1) -- IRQ
-// RTS (DBUS2) -- SCK
-// CTS (DBUS3) -- MOSI
-// DTR (DBUS4) -- CE
-// DSR (DBUS5) -- CSN
+// TxD (DBUS0) -- CSN
+// RxD (DBUS1) -- CE
+// RTS (DBUS2) -- MOSI
+// CTS (DBUS3) -- SCK
+// DTR (DBUS4) -- IRQ
+// DSR (DBUS5) -- MISO
 // GNF         -- GND
-// 3V3         -- VCC (decoupling required)
+// 3V3         -- VCC (decoupling required, eg: 47 µF + 4.7 nF)
+// You can connect VCC to USB 5V using serial LED (red or green, 20 mA) to
+// decrase VCC to 3.5 V in idle state, 2.5 V in transmit/receive. Thanks to LED
+// you can easly observe power conumption in every state (strong decoupling
+// required between LED and VCC, eg: 100…220 µF electr. + 4…22 nF ceramic).
 const (
-	MISO = 0x01
-	IRQ  = 0x02
-	SCK  = 0x04
-	MOSI = 0x08
-	CE   = 0x10
-	CSN  = 0x20
+	CSN  = 0x01
+	CE   = 0x02
+	MOSI = 0x04
+	SCK  = 0x08
+	IRQ  = 0x10
+	MISO = 0x20
 )
 
 func die(a ...interface{}) {
 	fmt.Fprintln(os.Stderr, a...)
-	os.Exit(1)
+	panic(a)
 }
 
 func checkErr(err error) {
@@ -47,18 +51,28 @@ type spiDrv struct {
 	debug bool
 	r     *ftdi.Device
 	w     *bufio.Writer
+
+	numr, numw int
 }
 
-func (d *spiDrv) Read(b []byte) (int, error) {
+func (d *spiDrv) Read(b []byte) (n int, err error) {
 	if d.debug {
 		defer fmt.Printf("spiread: %x\n", b)
+		/*defer func() {
+			d.numr += n
+			fmt.Printf("spiread: %d/%d %v\n", n, d.numr, err)
+		}()*/
 	}
 	return d.r.Read(b)
 }
 
-func (d *spiDrv) Write(b []byte) (int, error) {
+func (d *spiDrv) Write(b []byte) (n int, err error) {
 	if d.debug {
 		fmt.Printf("spiwrite: %x\n", b)
+		/*defer func() {
+			d.numw += n
+			fmt.Printf("spiwrite: %d/%d %v\n", n, d.numw, err)
+		}()*/
 	}
 	return d.w.Write(b)
 }
@@ -80,35 +94,40 @@ type nrfDrv struct {
 	ce, csn byte
 }
 
-// Enable(true);Enable(false) sets CE bit for period of 3 bit-bang symbols.
-// If you need such sequence set bit-bang baudrate < 3 sym / 10 us = 300000 Baud
-// to satisfy nRF24L01(+) timing or wait enough between calls.
+// SetCE(true);SetCE(false) sets CE bit for period of 5 bit-bang symbols.
+// Bit-bang baudrate must be ≤5 sym / 10 µs = 500000 Baud to satisfy
+// nRF24L01(+).
 func (d *nrfDrv) SetCE(up bool) error {
-	var ce byte
+	base := d.Base()
+	prePost, _ := d.PrePost()
+	var (
+		b  byte
+		pp []byte
+	)
 	if up {
-		ce = d.ce
+		base |= CE
+		prePost[0] |= CE
+		b = base | CSN
+		pp = []byte{b, b}
+	} else {
+		base &^= CE
+		prePost[0] &^= CE
+		b = base | CSN
 	}
-	base := d.csn | ce
-	prePost := []byte{base}
-	// Setup CSN, CE lines before and after conversation.
-	d.SetPrePost(prePost, prePost)
-	// Setup CSN, CE lines during conversation.
-	d.SetBase(base)
-
-	// This bit-bangs []byte{base, base, base}.
+	d.SetBase(b)
+	d.SetPrePost(pp, pp)
+	// This will bit-bang []byte{b,b,b,b,b} if up or []byte{b} if !up.
 	_, err := d.WriteRead()
-	if err == nil {
-		err = d.Flush()
-	}
-
-	// Clear CSN in base.
-	d.SetBase(ce)
-
+	d.SetBase(base)
+	d.SetPrePost(prePost, prePost)
 	return err
 }
 
 func newNrfDrv(ma *spi.Master, ce, csn byte) (*nrfDrv, error) {
 	d := &nrfDrv{Master: ma, ce: ce, csn: csn}
+	// Set CSN high before and after transaction
+	prePost := []byte{CSN}
+	d.SetPrePost(prePost, prePost)
 	return d, d.SetCE(false)
 }
 
@@ -117,14 +136,14 @@ func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
 	checkErr(err)
 	checkErr(ft.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
-	checkErr(ft.SetBaudrate(256 * 1024 / 16))
+	checkErr(ft.SetBaudrate(500 * 1000 / 16))
 	const cs = 4096
 	checkErr(ft.SetReadChunkSize(cs))
 	checkErr(ft.SetWriteChunkSize(cs))
 	checkErr(ft.SetLatencyTimer(2))
 	checkErr(ft.PurgeBuffers())
 
-	spid := &spiDrv{r: ft, w: bufio.NewWriterSize(ft, cs)}
+	spid := &spiDrv{r: ft, w: bufio.NewWriterSize(ft, cs), debug: false}
 	ma := spi.NewMaster(
 		spid,
 		SCK, MOSI, MISO,
@@ -251,8 +270,8 @@ func main() {
 	cfg := nrf.EnCRC | nrf.CRCO | nrf.PwrUp
 	future := nrf.DPL
 	ch := 125 // max. 125
-	rf := nrf.LNAHC | nrf.DRLow | nrf.Pwr(-18)
-	//rf := nrf.LNAHC | nrf.Pwr(-18)
+	//rf := nrf.LNAHC | nrf.DRLow | nrf.Pwr(-18)
+	rf := nrf.LNAHC | nrf.Pwr(-18)
 	retr := 15
 	var dlyus int
 	if future&nrf.AckPay != 0 {
@@ -269,19 +288,19 @@ func main() {
 		}
 	}
 	for _, radio := range radios {
+		_, err = radio.SetFeature(future)
+		checkErr(err)
 		_, err = radio.SetRF(rf)
 		checkErr(err)
 		_, err = radio.SetCh(ch)
 		checkErr(err)
 		_, err = radio.SetRetr(retr, dlyus)
 		checkErr(err)
-		_, err = radio.SetFeature(future)
+		_, err = radio.SetDynPD(nrf.PAll)
 		checkErr(err)
-		_, err = radio.SetDynPD(nrf.P0)
+		_, err = radio.SetAA(nrf.PAll)
 		checkErr(err)
-		_, err = radio.SetAA(nrf.P0)
-		checkErr(err)
-		_, err = radio.SetRxAE(nrf.P0)
+		_, err = radio.SetRxAE(nrf.PAll)
 		checkErr(err)
 	}
 	_, err = A.SetCfg(cfg)
@@ -295,13 +314,14 @@ func main() {
 	fmt.Println("\nTransmision\n")
 
 	go func() {
+		//spiA.debug = true
+		time.Sleep(100 * time.Millisecond)
 		var (
 			buf  [32]byte
 			lost int
 		)
-		time.Sleep(time.Second)
 		for k := 0; ; k++ {
-			time.Sleep(500 * time.Millisecond)
+			//time.Sleep(100 * time.Millisecond)
 			_, err = A.WriteTxP(buf[:])
 			checkErr(err)
 			checkErr(A.SetCE(true))
@@ -316,86 +336,96 @@ func main() {
 				buf[i-1]++
 			}
 
-			for i := 0; ; i++ {
-				for {
-					irq, err := spiA.IRQ()
-					checkErr(err)
-					if irq {
-						break
-					}
-				}
-				stat, err := A.NOP()
+			for {
+				irq, err := spiA.IRQ()
 				checkErr(err)
-				if i&0xff == 0 {
-					fmt.Println("A lost:", lost, "/", k+i, stat)
-				}
-				if stat&nrf.RxDR != 0 {
-					fmt.Println("!A: RxDR")
-					_, err := A.FlushRx()
-					checkErr(err)
-					_, err = A.Clear(nrf.RxDR)
-					checkErr(err)
-				}
-				if stat&nrf.TxDS != 0 {
-					_, err := A.Clear(nrf.TxDS)
-					checkErr(err)
-					break
-				}
-				if stat&nrf.MaxRT != 0 {
-					fmt.Println("A: MaxRT")
-					_, err = A.FlushTx()
-					checkErr(err)
-					_, err = A.Clear(nrf.MaxRT)
-					checkErr(err)
-					lost++
+				if irq {
 					break
 				}
 			}
+			stat, err := A.NOP()
+			checkErr(err)
+			if stat&nrf.TxDS != 0 {
+				_, err := A.Clear(nrf.TxDS)
+				checkErr(err)
+			}
+			if stat&nrf.MaxRT != 0 {
+				fmt.Println("A: MaxRT")
+				_, err = A.Clear(nrf.MaxRT)
+				checkErr(err)
+				_, err = A.FlushTx()
+				checkErr(err)
+				lost++
+			}
+			if stat&nrf.RxDR != 0 {
+				fmt.Println("!A: RxDR")
+				_, err = A.Clear(nrf.RxDR)
+				checkErr(err)
+				_, err := A.FlushRx()
+				checkErr(err)
+			}
+			fmt.Println("A lost:", lost, "/", k, stat)
 		}
 	}()
 
+	//spiB.debug = true
+	time.Sleep(100 * time.Millisecond)
 	checkErr(B.SetCE(true))
-	var buf [32]byte
-	for i := 0; ; i++ {
-		for {
-			irq, err := spiB.IRQ()
-			checkErr(err)
-			//fmt.Println("B irq:", irq)
-			if irq {
-				break
-			}
+	for {
+		irq, err := spiB.IRQ()
+		checkErr(err)
+		if !irq {
+			continue
 		}
-		plen, stat, err := B.RxPLen()
-		fmt.Println("B:", stat, plen)
+		stat, err := ma.NOP()
 		checkErr(err)
 		if stat&nrf.MaxRT != 0 {
-			fmt.Println("!B: MaxRT")
-			_, err = B.FlushTx()
-			checkErr(err)
-			_, err := B.Clear(nrf.MaxRT)
-			checkErr(err)
+			isrMaxRT(B, "B")
 		}
 		if stat&nrf.TxDS != 0 {
-			fmt.Println("!B: TxDS")
-			_, err := B.Clear(nrf.TxDS)
-			checkErr(err)
+			isrTxDS(B, "B")
 		}
 		if stat&nrf.RxDR != 0 {
-			if plen > 32 {
-				fmt.Println("B: ", plen, "> 32")
-				_, err = B.FlushRx()
-				checkErr(err)
-			} else {
-				fmt.Println("B: ", stat, "Plen:", plen)
-				checkErr(err)
-				_, err = B.ReadRxP(buf[:plen])
-				checkErr(err)
-				fmt.Println("B: ", buf[:plen])
-			}
-			_, err = B.Clear(nrf.RxDR)
+			isrRxDR(B, "B")
+		}
+	}
+}
+
+func isrMaxRT(dev nrf.Device, name string) {
+	_, err := dev.Clear(nrf.MaxRT)
+	checkErr(err)
+	_, err = dev.FlushTx()
+	checkErr(err)
+	fmt.Print(name, ": MaxRT\n")
+
+}
+
+func isrTxDS(dev nrf.Device, name string) {
+	_, err := dev.Clear(nrf.TxDS)
+	checkErr(err)
+	fmt.Print(name, ": TxDS\n")
+}
+
+func isrRxDR(dev nrf.Device, name string) {
+	var buf [32]byte
+	for {
+		_, err = dev.Clear(nrf.RxDR)
+		checkErr(err)
+		plen, stat, err := dev.RxPLen()
+		checkErr(err)
+		if plen > 32 {
+			fmt.Printf("%s: pipe=%d plen=%d>32\n", name, stat.RxPipe(), plen, "> 32")
+			_, err = dev.FlushRx()
 			checkErr(err)
-		} else if i&0xff == 0 {
-			fmt.Println("B: ", stat)
+		} else {
+			_, err = dev.ReadRxP(buf[:plen])
+			checkErr(err)
+			fmt.Printf("%s: pipe=%d %v", name, stat.RxPipe(), buf[:plen])
+		}
+		fifo, _, err := dev.FIFO()
+		checkErr(err)
+		if fifo&RxEmpty != 0 {
+			break
 		}
 	}
 }
