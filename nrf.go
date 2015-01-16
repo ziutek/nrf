@@ -14,4 +14,12 @@ type Driver interface {
 // Device wraps driver to provide interface to nRF24L01(+) transceiver.
 type Device struct {
 	Driver
+	
+	// Err is error value of last executed command. You can freely call many
+	// command methods before check error. If one command return an error
+	// subsequent commands are not executed.
+	Err error
+	
+	// Status is value of status register read by last executed command.
+	Status
 }

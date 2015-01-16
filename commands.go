@@ -1,17 +1,33 @@
 package nrf
 
 // Reg invokes R_REGISTER command.
-func (d Device) Reg(addr byte, val []byte) (Stat, error) {
+func (d *Device) Reg(addr byte, val []byte) {
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{addr}, stat[:], nil, val)
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{addr}, stat[:], nil, val)
+	d.Status = Status(stat[0])
 }
 
 // SetReg invokes W_REGISTER command.
-func (d Device) SetReg(addr byte, val ...byte) (Stat, error) {
+func (d *Device) SetReg(addr byte, val ...byte) {
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{addr | 0x20}, stat[:], val)
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{addr | 0x20}, stat[:], val)
+	d.Status = Status(stat[0])
+}
+
+// ReadRxP invokes R_RX_PAYLOAD command.
+func (d *Device) ReadRxP(pay []byte) {
+	if d.Err != nil {
+		return
+	}
+	var stat [1]byte
+	_, d.Err = d.WriteRead([]byte{0x61}, stat[:], nil, pay)
+	d.Status = Status(stat[0])
 }
 
 func checkPlen(plen int) {
@@ -20,76 +36,97 @@ func checkPlen(plen int) {
 	}
 }
 
-// ReadRxP invokes R_RX_PAYLOAD command.
-func (d Device) ReadRxP(pay []byte) (Stat, error) {
-	var stat [1]byte
-	_, err := d.WriteRead([]byte{0x61}, stat[:], nil, pay)
-	return Stat(stat[0]), err
-}
-
 // WriteTxP invokes W_TX_PAYLOAD command.
-func (d Device) WriteTxP(pay []byte) (Stat, error) {
+func (d *Device) WriteTxP(pay []byte) {
 	checkPlen(len(pay))
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{0xa0}, stat[:], pay)
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{0xa0}, stat[:], pay)
+	d.Status = Status(stat[0])
 }
 
 // FlushTx invokes FLUSH_TX command.
-func (d Device) FlushTx() (Stat, error) {
+func (d *Device) FlushTx() {
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{0xe1}, stat[:])
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{0xe1}, stat[:])
+	d.Status = Status(stat[0])
 }
 
 // FlushRx invokes FLUSH_RX command.
-func (d Device) FlushRx() (Stat, error) {
+func (d *Device) FlushRx() {
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{0xe2}, stat[:])
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{0xe2}, stat[:])
+	d.Status = Status(stat[0])
 }
 
 // ReuseTxP invokes REUSE_TX_PL command.
-func (d Device) ReuseTxP() (Stat, error) {
+func (d *Device) ReuseTxP() {
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{0xe3}, stat[:])
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{0xe3}, stat[:])
+	d.Status = Status(stat[0])
 }
 
 // Activate invokes nRF24L01 ACTIVATE command.
-func (d Device) Activate(b byte) (Stat, error) {
+func (d *Device) Activate(b byte) {
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{0x50, b}, stat[:])
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{0x50, b}, stat[:])
+	d.Status = Status(stat[0])
 }
 
 // RxPLen invokes R_RX_PL_WID command.
-func (d Device) RxPLen() (int, Stat, error) {
+func (d *Device) RxPLen() int {
+	if d.Err != nil {
+		return 0
+	}
 	var ret [2]byte
-	_, err := d.WriteRead([]byte{0x60}, ret[:])
-	return int(ret[1]), Stat(ret[0]), err
+	_, d.Err = d.WriteRead([]byte{0x60}, ret[:])
+	d.Status = Status(ret[0])
+	return int(ret[1])
 }
 
 // WriteAckP invokes W_ACK_PAYLOAD command.
-func (d Device) WriteAckP(pn int, pay []byte) (Stat, error) {
+func (d *Device) WriteAckP(pn int, pay []byte) {
 	checkPN(pn)
 	checkPlen(len(pay))
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{byte(0xa8 | pn)}, stat[:], pay)
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{byte(0xa8 | pn)}, stat[:], pay)
+	d.Status = Status(stat[0])
 }
 
 // WriteTxPNoAck invokes W_TX_PAYLOAD_NOACK command.
-func (d Device) WriteTxPNoAck(pay []byte) (Stat, error) {
+func (d *Device) WriteTxPNoAck(pay []byte) {
 	checkPlen(len(pay))
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{0xa0}, stat[:], pay)
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{0xa0}, stat[:], pay)
+	d.Status = Status(stat[0])
 }
 
 // NOP invokes NOP command.
-func (d Device) NOP() (Stat, error) {
+func (d *Device) NOP() {
+	if d.Err != nil {
+		return
+	}
 	var stat [1]byte
-	_, err := d.WriteRead([]byte{0xff}, stat[:])
-	return Stat(stat[0]), err
+	_, d.Err = d.WriteRead([]byte{0xff}, stat[:])
+	d.Status = Status(stat[0])
 }

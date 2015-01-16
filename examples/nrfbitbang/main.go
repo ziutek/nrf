@@ -21,11 +21,11 @@ import (
 // DTR (DBUS4) -- IRQ
 // DSR (DBUS5) -- MISO
 // GNF         -- GND
-// 3V3         -- VCC (decoupling required, eg: 47 µF + 4.7 nF)
+// 3V3         -- VCC (decoupling required, eg: 10 µF + 10 nF)
 // You can connect VCC to USB 5V using serial LED (red or green, 20 mA) to
 // decrase VCC to 3.5 V in idle state, 2.5 V in transmit/receive. Thanks to LED
 // you can easly observe power conumption in every state (strong decoupling
-// required between LED and VCC, eg: 100…220 µF electr. + 4…22 nF ceramic).
+// required between LED and VCC, eg: 47 µF electr. + 22 nF ceramic).
 const (
 	CSN  = 0x01
 	CE   = 0x02
@@ -157,59 +157,41 @@ func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
 	nrfd, err := newNrfDrv(ma, CE, CSN)
 	checkErr(err)
 
-	return nrf.Device{nrfd}, spid
+	return nrf.Device{Driver: nrfd}, spid
 }
 
-func info(radios []nrf.Device) {
-	for i, radio := range radios {
-		cfg, stat, err := radio.Cfg()
-		checkErr(err)
-		aa, _, err := radio.AA()
-		checkErr(err)
-		rxae, _, err := radio.RxAE()
-		checkErr(err)
-		aw, _, err := radio.AW()
-		checkErr(err)
-		cnt, dlyus, _, err := radio.Retr()
-		checkErr(err)
-		ch, _, err := radio.Ch()
-		checkErr(err)
-		rf, _, err := radio.RF()
-		checkErr(err)
-		plos, arc, _, err := radio.TxCnt()
-		checkErr(err)
-		rpd, _, err := radio.RPD()
-		checkErr(err)
+func info(devs []nrf.Device) {
+	for i, dev := range devs {
+		cfg := dev.Config()
+		aa := dev.AA()
+		rxae := dev.RxAE()
+		aw := dev.AW()
+		cnt, dlyus := dev.Retr()
+		ch := dev.Ch()
+		rf := dev.RF()
+		plos, arc := dev.TxCnt()
+		rpd := dev.RPD()
 		rpds := "< -64dBm"
 		if rpd {
 			rpds = "> -64dBm"
 		}
 		var a0, a1, txa [5]byte
-		_, err = radio.RxAddr(0, a0[:])
-		checkErr(err)
-		_, err = radio.RxAddr(1, a1[:])
-		checkErr(err)
-		a2, _, err := radio.RxAddr0(2)
-		checkErr(err)
-		a3, _, err := radio.RxAddr0(3)
-		checkErr(err)
-		a4, _, err := radio.RxAddr0(4)
-		checkErr(err)
-		a5, _, err := radio.RxAddr0(5)
-		checkErr(err)
-		_, err = radio.TxAddr(txa[:])
-		checkErr(err)
+		dev.RxAddr(0, a0[:])
+		dev.RxAddr(1, a1[:])
+		a2 := dev.RxAddr0(2)
+		a3 := dev.RxAddr0(3)
+		a4 := dev.RxAddr0(4)
+		a5 := dev.RxAddr0(5)
+		dev.TxAddr(txa[:])
 		var pw [6]int
 		for i := range pw {
-			pw[i], _, err = radio.RxPW(i)
-			checkErr(err)
+			pw[i] = dev.RxPW(i)
 		}
-		fifo, _, err := radio.FIFO()
-		checkErr(err)
-		dynpd, _, err := radio.DynPD()
-		checkErr(err)
-		feature, _, err := radio.Feature()
-		checkErr(err)
+		fifo := dev.FIFO()
+		dynpd := dev.DynPD()
+		feature := dev.Feature()
+
+		checkErr(dev.Err)
 
 		fmt.Printf(
 			"Radio %c registers:\n"+
@@ -233,7 +215,7 @@ func info(radios []nrf.Device) {
 			'A'+i,
 			cfg, aa, rxae, aw,
 			cnt, dlyus,
-			ch, rf, stat,
+			ch, rf, dev.Status,
 			plos, arc,
 			rpd, rpds,
 			a0, a1, a2, a3, a4, a5, txa,
@@ -288,25 +270,19 @@ func main() {
 		}
 	}
 	for _, radio := range radios {
-		_, err = radio.SetFeature(future)
-		checkErr(err)
-		_, err = radio.SetRF(rf)
-		checkErr(err)
-		_, err = radio.SetCh(ch)
-		checkErr(err)
-		_, err = radio.SetRetr(retr, dlyus)
-		checkErr(err)
-		_, err = radio.SetDynPD(nrf.P0)
-		checkErr(err)
-		_, err = radio.SetAA(nrf.P0)
-		checkErr(err)
-		_, err = radio.SetRxAE(nrf.P0)
-		checkErr(err)
+		radio.SetFeature(future)
+		radio.SetRF(rf)
+		radio.SetCh(ch)
+		radio.SetRetr(retr, dlyus)
+		radio.SetDynPD(nrf.P0)
+		radio.SetAA(nrf.P0)
+		radio.SetRxAE(nrf.P0)
+		checkErr(radio.Err)
 	}
-	_, err = A.SetCfg(cfg)
-	checkErr(err)
-	_, err = B.SetCfg(cfg | nrf.PrimRx)
-	checkErr(err)
+	A.SetCfg(cfg)
+	checkErr(A.Err)
+	B.SetCfg(cfg | nrf.PrimRx)
+	checkErr(B.Err)
 
 	fmt.Println("\nAfter configuration\n")
 	info(radios)
@@ -324,11 +300,11 @@ func main() {
 		// and speedups transmission but incrases power consumption.
 		// checkErr(A.SetCE(1))
 		for n := 0; ; n++ {
-			_, err = A.WriteTxP(buf[:])
-			checkErr(err)
+			A.WriteTxP(buf[:])
+			checkErr(A.Err)
 
 			// Don't use SetCE(1);sleep(10µs);SetCE(0).
-			// 
+			//
 			// Delay beetwen setting CE line high and next low isn't generally
 			// realiable (it can be only in case of realtime OS and carefully
 			// written application). Such seqeunce causes strange behavior of
@@ -360,16 +336,16 @@ func main() {
 					break
 				}
 			}
-			stat, err := A.NOP()
-			checkErr(err)
-			if stat&nrf.MaxRT != 0 {
+			A.NOP()
+			checkErr(A.Err)
+			if A.Status&nrf.MaxRT != 0 {
 				isrMaxRT(A, "A")
 				lost++
 			}
-			if stat&nrf.TxDS != 0 {
+			if A.Status&nrf.TxDS != 0 {
 				isrTxDS(A, "A", n, lost)
 			}
-			if stat&nrf.RxDR != 0 {
+			if A.Status&nrf.RxDR != 0 {
 				isrRxDR(A, "!A")
 			}
 		}
@@ -384,54 +360,51 @@ func main() {
 		if !irq {
 			continue
 		}
-		stat, err := B.NOP()
-		checkErr(err)
-		if stat&nrf.MaxRT != 0 {
+		B.NOP()
+		checkErr(B.Err)
+		if B.Status&nrf.MaxRT != 0 {
 			isrMaxRT(B, "!B")
 		}
-		if stat&nrf.TxDS != 0 {
+		if B.Status&nrf.TxDS != 0 {
 			isrTxDS(B, "!B", -1, -1)
 		}
-		if stat&nrf.RxDR != 0 {
+		if B.Status&nrf.RxDR != 0 {
 			isrRxDR(B, "B")
 		}
 	}
 }
 
 func isrMaxRT(dev nrf.Device, name string) {
-	_, err := dev.Clear(nrf.MaxRT)
-	checkErr(err)
-	_, err = dev.FlushTx()
-	checkErr(err)
-	stat, err := dev.NOP()
-	checkErr(err)
-	fmt.Printf("%s: MaxRT %s\n", name, stat)
+	dev.Clear(nrf.MaxRT)
+	dev.FlushTx()
+	dev.NOP()
+	checkErr(dev.Err)
+	fmt.Printf("%s: MaxRT %s\n", name, dev.Status)
 }
 
 func isrTxDS(dev nrf.Device, name string, n, lost int) {
-	_, err := dev.Clear(nrf.TxDS)
-	checkErr(err)
+	dev.Clear(nrf.TxDS)
+	checkErr(dev.Err)
 	fmt.Printf("%s: TxDS n=%d lost=%d\n", name, n, lost)
 }
 
 func isrRxDR(dev nrf.Device, name string) {
 	var buf [32]byte
 	for {
-		plen, stat, err := dev.RxPLen()
-		checkErr(err)
+		plen := dev.RxPLen()
+		checkErr(dev.Err)
 		if plen > 32 {
-			fmt.Printf("%s: pipe=%d plen=%d>32\n", name, stat.RxPipe(), plen)
-			_, err = dev.FlushRx()
-			checkErr(err)
+			fmt.Printf("%s: pipe=%d plen=%d>32\n", name, dev.RxPipe(), plen)
+			dev.FlushRx()
+			checkErr(dev.Err)
 		} else {
-			_, err = dev.ReadRxP(buf[:plen])
-			checkErr(err)
-			fmt.Printf("%s: pipe=%d %v\n", name, stat.RxPipe(), buf[:plen])
+			dev.ReadRxP(buf[:plen])
+			checkErr(dev.Err)
+			fmt.Printf("%s: pipe=%d %v\n", name, dev.RxPipe(), buf[:plen])
 		}
-		_, err = dev.Clear(nrf.RxDR)
-		checkErr(err)
-		fifo, _, err := dev.FIFO()
-		checkErr(err)
+		dev.Clear(nrf.RxDR)
+		fifo := dev.FIFO()
+		checkErr(dev.Err)
 		if fifo&nrf.RxEmpty != 0 {
 			break
 		}
