@@ -5,8 +5,10 @@ package nrf
 type Driver interface {
 	// WriteRead perform SPI conversation (see bitbang/spi package).
 	WriteRead(oi ...[]byte) (n int, err error)
-	// Set CE line.
-	SetCE(bool) error
+	
+	// Set CE line. v==0 sets CE low, v==1 sets CE high, v==2 pulses
+	// CE high for 10 µs and leaves it low.
+	SetCE(v int) error
 }
 
 // Device wraps driver to provide interface to nRF24L01(+) transceiver.

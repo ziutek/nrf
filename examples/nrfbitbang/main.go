@@ -58,10 +58,6 @@ type spiDrv struct {
 func (d *spiDrv) Read(b []byte) (n int, err error) {
 	if d.debug {
 		defer fmt.Printf("spiread: %x\n", b)
-		/*defer func() {
-			d.numr += n
-			fmt.Printf("spiread: %d/%d %v\n", n, d.numr, err)
-		}()*/
 	}
 	return d.r.Read(b)
 }
@@ -69,10 +65,6 @@ func (d *spiDrv) Read(b []byte) (n int, err error) {
 func (d *spiDrv) Write(b []byte) (n int, err error) {
 	if d.debug {
 		fmt.Printf("spiwrite: %x\n", b)
-		/*defer func() {
-			d.numw += n
-			fmt.Printf("spiwrite: %d/%d %v\n", n, d.numw, err)
-		}()*/
 	}
 	return d.w.Write(b)
 }
@@ -94,29 +86,36 @@ type nrfDrv struct {
 	ce, csn byte
 }
 
-// SetCE(true);SetCE(false) sets CE bit for period of 5 bit-bang symbols.
-// Bit-bang baudrate must be ≤5 sym / 10 µs = 500000 Baud to satisfy
-// nRF24L01(+).
-func (d *nrfDrv) SetCE(up bool) error {
+// SetCE(0) sets CE low, SetCE(1) sets CE high, SetCE(2) sets CE high for 6
+// periods and next sets CE low. Bit-bang baudrate must be < (6 sym / 10 µs) =
+// 600000 Baud to satisfy nRF24L01(+) spec.
+func (d *nrfDrv) SetCE(v int) error {
 	base := d.Base()
 	prePost, _ := d.PrePost()
 	var (
-		b  byte
-		pp []byte
+		b   byte
+		pre []byte
 	)
-	if up {
-		base |= CE
-		prePost[0] |= CE
-		b = base | CSN
-		pp = []byte{b, b}
-	} else {
+	switch v {
+	case 0: // Set CE low.
 		base &^= CE
 		prePost[0] &^= CE
 		b = base | CSN
+	case 1: // Set CE high.
+		base |= CE
+		prePost[0] |= CE
+		b = base | CSN
+	case 2: // Pulse CE: 111110.
+		b = base | CE | CSN
+		base &^= CE
+		prePost[0] &^= CE
+		pre = []byte{b, b, b, b, b, b}
+		b &^= CE
+	default:
+		panic("v<0 || v>2")
 	}
+	d.SetPrePost(pre, nil)
 	d.SetBase(b)
-	d.SetPrePost(pp, pp)
-	// This will bit-bang []byte{b,b,b,b,b} if up or []byte{b} if !up.
 	_, err := d.WriteRead()
 	d.SetBase(base)
 	d.SetPrePost(prePost, prePost)
@@ -128,7 +127,7 @@ func newNrfDrv(ma *spi.Master, ce, csn byte) (*nrfDrv, error) {
 	// Set CSN high before and after transaction
 	prePost := []byte{CSN}
 	d.SetPrePost(prePost, prePost)
-	return d, d.SetCE(false)
+	return d, d.SetCE(0)
 }
 
 func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
@@ -136,14 +135,14 @@ func setup(udev *ftdi.USBDev) (nrf.Device, *spiDrv) {
 	checkErr(err)
 	checkErr(ft.SetBitmode(SCK|MOSI|CE|CSN, ftdi.ModeSyncBB))
 
-	checkErr(ft.SetBaudrate(500 * 1000 / 16))
+	checkErr(ft.SetBaudrate(512 * 1024 / 16))
 	const cs = 4096
 	checkErr(ft.SetReadChunkSize(cs))
 	checkErr(ft.SetWriteChunkSize(cs))
 	checkErr(ft.SetLatencyTimer(2))
 	checkErr(ft.PurgeBuffers())
 
-	spid := &spiDrv{r: ft, w: bufio.NewWriterSize(ft, cs), debug: false}
+	spid := &spiDrv{r: ft, w: bufio.NewWriterSize(ft, cs)}
 	ma := spi.NewMaster(
 		spid,
 		SCK, MOSI, MISO,
@@ -312,7 +311,7 @@ func main() {
 	fmt.Println("\nAfter configuration\n")
 	info(radios)
 
-	fmt.Println("\nTransmision\n")
+	fmt.Println("\nTransmission\n")
 
 	go func() {
 		//spiA.debug = true
@@ -321,14 +320,29 @@ func main() {
 			lost int
 		)
 		time.Sleep(5 * time.Millisecond)
-		checkErr(A.SetCE(true))
+		// You can kept CE high all the time. This works very realiable
+		// and speedups transmission but incrases power consumption.
+		// checkErr(A.SetCE(1))
 		for n := 0; ; n++ {
 			_, err = A.WriteTxP(buf[:])
 			checkErr(err)
-			// Don't use CE pulse. For high packet rate it randomly blocks AA in
-			// PTX (status: RxDR- TxDS- MaxRT+ FullTx+, RxPipe:3, Tx FIFO can't
-			// be flushed, MaxRT can't be cleared, pipe 3 is disabled). This can
-			// be bug in this software (that I can't find it) or bug in silicon.
+
+			// Don't use SetCE(1);sleep(10µs);SetCE(0).
+			// 
+			// Delay beetwen setting CE line high and next low isn't generally
+			// realiable (it can be only in case of realtime OS and carefully
+			// written application). Such seqeunce causes strange behavior of
+			// nRF24 PTX:
+			//   RxDR- TxDS- MaxRT+ FullTx+ RxPipe: 3.
+			// Tx FIFO can't be flushed, MaxRT can't be cleared, data from
+			// Rx FIFO can't be read or flushed.
+			//
+			// SetCE(2) works realiable only if write buffering guarantees
+			// that it cause only single system call.
+			//
+			// Next source of problem is stability of FT232R baudrate. It seems
+			// to work realiabe if baudrate is set to power of two.
+			checkErr(A.SetCE(2))
 
 			buf[31]++
 			for i := 31; i > 0; i-- {
@@ -363,7 +377,7 @@ func main() {
 
 	//spiB.debug = true
 	time.Sleep(5 * time.Millisecond)
-	checkErr(B.SetCE(true))
+	checkErr(B.SetCE(1))
 	for {
 		irq, err := spiB.IRQ()
 		checkErr(err)
